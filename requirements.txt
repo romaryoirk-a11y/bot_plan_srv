@@ -1,6 +1,5 @@
 python-telegram-bot>=20.0
 apscheduler
 pytz
-timezonefinder
 starlette
 uvicorn
