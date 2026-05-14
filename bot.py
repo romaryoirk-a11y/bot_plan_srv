@@ -1,5 +1,5 @@
 # ==========================================
-# TELEGRAM REMINDER BOT - GROUP MENTIONS + RAILWAY
+# TELEGRAM REMINDER BOT - GROUP MENTIONS + TZ FIX
 # ==========================================
 
 import os, sys, sqlite3, logging, logging.handlers, re, asyncio, signal
@@ -27,14 +27,12 @@ tf = TimezoneFinder()
 # ========== БАЗА ДАННЫХ ==========
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
-        # Таблица пользователей
         conn.execute('''CREATE TABLE IF NOT EXISTS users
                         (user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT,
                          timezone TEXT DEFAULT 'Europe/Moscow', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
         try: conn.execute("ALTER TABLE users ADD COLUMN timezone TEXT DEFAULT 'Europe/Moscow'")
         except: pass
         
-        # Таблица напоминаний (добавили chat_id)
         conn.execute('''CREATE TABLE IF NOT EXISTS reminders
                         (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, chat_id INTEGER, title TEXT,
                          reminder_datetime TEXT, repeat_type TEXT DEFAULT 'none', is_active INTEGER DEFAULT 1,
@@ -135,7 +133,7 @@ def settings_kb(): return InlineKeyboardMarkup([
 
 def tz_kb(): return InlineKeyboardMarkup([
     [InlineKeyboardButton("🇷🇺 Москва (UTC+3)", callback_data="tz_Europe/Moscow"), InlineKeyboardButton("🇷 Екатеринбург (UTC+5)", callback_data="tz_Asia/Yekaterinburg")],
-    [InlineKeyboardButton("🇷 Новосибирск (UTC+7)", callback_data="tz_Asia/Novosibirsk"), InlineKeyboardButton("🇷🇺 Владивосток (UTC+10)", callback_data="tz_Asia/Vladivostok")],
+    [InlineKeyboardButton("🇷 Новосибирск (UTC+7)", callback_data="tz_Asia/Novosibirsk"), InlineKeyboardButton("🇷 Владивосток (UTC+10)", callback_data="tz_Asia/Vladivostok")],
     [InlineKeyboardButton("🌍 Лондон (UTC+0)", callback_data="tz_Europe/London"), InlineKeyboardButton("🌐 UTC", callback_data="tz_UTC")],
     [InlineKeyboardButton("📍 Авто (GPS)", callback_data="gps_request")],
     [InlineKeyboardButton("🔙 Назад", callback_data="settings")]
@@ -231,7 +229,7 @@ async def process_reminder_text(update, context, text):
         return await update.message.reply_text("❌ Не удалось распознать время.\n\nФормат: `Название завтра 15:00`", parse_mode="Markdown")
     
     uid = update.effective_user.id
-    chat_id = update.effective_chat.id # 🔥 Сохраняем ID чата (группа или личка)
+    chat_id = update.effective_chat.id 
     tz = get_user_tz(uid)
     utc_dt = tz.localize(dt, is_dst=True).astimezone(pytz.UTC)
     
@@ -289,137 +287,6 @@ async def apply_template(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.edit_message_text(f"📝 *{title}*\n\nУкажите время (например: `завтра 10:00`):", parse_mode="Markdown")
     context.user_data['awaiting_reminder'] = True
 
+# 🔥 ИСПРАВЛЕННЫЙ ХЕНДЛЕР ЧАСОВЫХ ПОЯСОВ
 async def handle_tz_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query; d = q.data; await q.answer()
-    if d == "gps_request":
-        kb = [[KeyboardButton("📍 Отправить геолокацию", request_location=True)]]
-        await q.message.reply_text("📍 Нажмите кнопку ниже:", reply_markup=ReplyKeyboardMarkup(kb, one_time_keyboard=True, resize_keyboard=True))
-        context.user_data['waiting_for_gps_tz'] = True
-        return
-    tz_name = d[3:] if d.startswith("tz_") else None
-    if tz_name:
-        try:
-            tz = pytz.timezone(tz_name)
-            set_user_tz(q.from_user.id, tz.zone)
-            await q.edit_message_text(f"✅ *Пояс изменён!*\n🌍 {tz.zone}", parse_mode="Markdown", reply_markup=tz_kb())
-        except: await q.edit_message_text("❌ Ошибка", reply_markup=tz_kb())
-    elif d == "settings": await settings_menu(update, context)
-
-async def handle_gps_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get('waiting_for_gps_tz') or not update.message.location: return
-    lat, lon = update.message.location.latitude, update.message.location.longitude
-    tz_name = tf.timezone_at(lat=lat, lng=lon)
-    await update.message.reply_text("⌨️ Готово", reply_markup=ReplyKeyboardRemove())
-    context.user_data.pop('waiting_for_gps_tz', None)
-    if tz_name:
-        set_user_tz(update.effective_user.id, tz_name)
-        await update.message.reply_text(f"✅ Пояс определён: *{tz_name}*", parse_mode="Markdown", reply_markup=main_kb())
-    else: await update.message.reply_text("❌ Не удалось определить. Выберите вручную:", reply_markup=tz_kb())
-
-async def view_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query; await q.answer()
-    rid = int(q.data.split("_")[1]); uid = update.effective_user.id; tz = get_user_tz(uid)
-    rem = get_reminder(rid, uid)
-    if not rem: return await q.edit_message_text("❌ Не найдено", reply_markup=main_kb())
-    _, title, dt, rt = rem
-    txt = {"none":"Без повтора","daily":"Ежедневно","weekly":"Еженедельно","monthly":"Ежемесячно"}.get(rt, "Без повтора")
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔁 Изменить повтор", callback_data=f"repeat_{rid}")],
-        [InlineKeyboardButton("🗑 Удалить", callback_data=f"del_{rid}")],
-        [InlineKeyboardButton("🔙 Назад", callback_data="list_reminders")]
-    ])
-    await q.edit_message_text(f"📌 *{title}*\n📅 {fmt_dt(dt, tz)}\n🔄 {txt}", parse_mode="Markdown", reply_markup=kb)
-
-async def delete_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query; await q.answer()
-    rid = int(q.data.split("_")[1]); uid = update.effective_user.id
-    del_reminder(rid, uid)
-    sched = context.bot_data.get('scheduler')
-    if sched:
-        try: sched.remove_job(f"rem_{rid}")
-        except: pass
-    await q.edit_message_text("✅ Удалено", reply_markup=main_kb())
-
-async def repeat_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query; await q.answer()
-    rid = int(q.data.split("_")[1])
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔹 Без повтора", callback_data=f"setrep_{rid}_none")],
-        [InlineKeyboardButton("🔄 Ежедневно", callback_data=f"setrep_{rid}_daily")],
-        [InlineKeyboardButton("📆 Еженедельно", callback_data=f"setrep_{rid}_weekly")],
-        [InlineKeyboardButton("📅 Ежемесячно", callback_data=f"setrep_{rid}_monthly")],
-        [InlineKeyboardButton("🔙 Назад", callback_data=f"view_{rid}")]
-    ])
-    await q.edit_message_text("🔄 *Выберите повтор:*\n(Изменение применится к следующим срабатываниям)", parse_mode="Markdown", reply_markup=kb)
-
-async def set_repeat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query; await q.answer()
-    parts = q.data.split("_"); rid = int(parts[1]); rt = parts[2]
-    uid = update.effective_user.id
-    with sqlite3.connect(DB_PATH) as conn: conn.execute("UPDATE reminders SET repeat_type=? WHERE id=? AND user_id=?", (rt, rid, uid)); conn.commit()
-    await q.edit_message_text(f"✅ Повтор изменён на: {rt}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data=f"view_{rid}")]]))
-
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.error(f"Update {update} caused error {context.error}")
-
-# ========== ЗАПУСК ==========
-async def main():
-    logger.info("🔗 Запуск бота...")
-    app = Application.builder().token(BOT_TOKEN).build()
-    sched = AsyncIOScheduler(); sched.start(); app.bot_data['scheduler'] = sched
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("settings", settings_menu))
-    app.add_handler(CommandHandler("myevents", list_reminders))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("add", create_prompt))
-    
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_reminder_input))
-    
-    app.add_handler(CallbackQueryHandler(create_prompt, pattern="^create_prompt$"))
-    app.add_handler(CallbackQueryHandler(list_reminders, pattern="^list_reminders$"))
-    app.add_handler(CallbackQueryHandler(settings_menu, pattern="^settings$"))
-    app.add_handler(CallbackQueryHandler(tz_menu, pattern="^tz_menu$"))
-    app.add_handler(CallbackQueryHandler(templates_menu, pattern="^templates$"))
-    app.add_handler(CallbackQueryHandler(apply_template, pattern="^tpl_"))
-    app.add_handler(CallbackQueryHandler(handle_tz_select, pattern="^(tz_|gps_request|settings)$"))
-    app.add_handler(CallbackQueryHandler(help_cmd, pattern="^help$"))
-    app.add_handler(CallbackQueryHandler(back_main, pattern="^back_main$"))
-    app.add_handler(CallbackQueryHandler(view_reminder, pattern="^view_"))
-    app.add_handler(CallbackQueryHandler(delete_reminder, pattern="^del_"))
-    app.add_handler(CallbackQueryHandler(repeat_menu, pattern="^repeat_"))
-    app.add_handler(CallbackQueryHandler(set_repeat, pattern="^setrep_"))
-    app.add_handler(MessageHandler(filters.LOCATION, handle_gps_location))
-    app.add_error_handler(error_handler)
-
-    await app.bot.set_my_commands([
-        BotCommand("start", "🚀 Старт"), BotCommand("add", "➕ Создать"),
-        BotCommand("myevents", "📋 Мои"), BotCommand("settings", "⚙️ Настройки")
-    ])
-
-    logger.info("✅ Бот запущен!")
-    await app.initialize(); await app.start(); await app.updater.start_polling(drop_pending_updates=True)
-    
-    stop_event = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT): loop.add_signal_handler(sig, stop_event.set)
-    await stop_event.wait()
-    await app.updater.stop(); await app.stop(); await app.shutdown(); sched.shutdown()
-
-# 🔥 УЛУЧШЕННАЯ ФУНКЦИЯ ОТПРАВКИ НАПОМИНАНИЯ
-async def send_reminder(uid, title, chat_id, rid, app):
-    # Создаем упоминание пользователя через tg://user?id=UID
-    # Это сработает даже если у юзера нет username (@name)
-    mention = f"[User](tg://user?id={uid})"
-    
-    text = f"🔔 *Напоминание для {mention}!*\n\n📝 *{title}*\n\nВремя пришло! ⏰"
-    
-    try:
-        await app.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
-    except Exception as e:
-        logger.error(f"Failed to send reminder to chat {chat_id}: {e}")
-        # Если бота кикнули из группы или заблокировали, логируем ошибку
-
-if __name__ == "__main__":
-    try: asyncio.run(main())
-    except KeyboardInterrupt: logger.info("Stopped by user")
+    q = update.callback_query; d = q; d = q
