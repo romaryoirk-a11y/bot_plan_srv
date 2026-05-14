@@ -1,5 +1,5 @@
 # ==========================================
-# TELEGRAM REMINDER BOT - RAILWAY OPTIMIZED
+# TELEGRAM REMINDER BOT - RAILWAY OPTIMIZED (FIXED)
 # ==========================================
 
 import os, sys, sqlite3, logging, logging.handlers, re, asyncio, signal
@@ -73,7 +73,6 @@ def fmt_dt(dt_str, tz):
     except: return dt_str
 
 def parse_natural_reminder(text):
-    """Умный парсинг: 'Встреча завтра в 15:00' -> (Встреча, datetime)"""
     text = text.strip()
     patterns = [
         r'^(.+?)\s+завтра\s+([0-1]?[0-9]|2[0-3]):([0-5][0-9])$',
@@ -93,14 +92,14 @@ def parse_natural_reminder(text):
                     days = 1 if 'завтра' in p else 0
                     h, mi = int(groups[1]), int(groups[2])
                     dt = (now + timedelta(days=days)).replace(hour=h, minute=mi, second=0, microsecond=0)
-                elif len(groups) == 4: # ДД.ММ ЧЧ:ММ
+                elif len(groups) == 4:
                     d, mo, h, mi = int(groups[1]), int(groups[2]), int(groups[3]), int(groups[4])
                     dt = datetime(now.year, mo, d, h, mi)
                     if dt < now: dt = dt.replace(year=now.year+1)
-                elif len(groups) == 6: # ДД.ММ.ГГГГ ЧЧ:ММ
+                elif len(groups) == 6:
                     d, mo, y, h, mi = int(groups[1]), int(groups[2]), int(groups[3]), int(groups[4]), int(groups[5])
                     dt = datetime(y, mo, d, h, mi)
-                else: # Просто время ЧЧ:ММ
+                else:
                     h, mi = int(groups[1]), int(groups[2])
                     dt = now.replace(hour=h, minute=mi, second=0, microsecond=0)
                     if dt <= now: dt += timedelta(days=1)
@@ -136,7 +135,7 @@ def template_kb(): return InlineKeyboardMarkup([
     [InlineKeyboardButton("🔙 Назад", callback_data="settings")]
 ])
 
-# ========== ХЕНДЛЕРЫ ==========
+# ========== УНИВЕРСАЛЬНЫЕ ХЕНДЛЕРЫ (РАБОТАЮТ И КАК КОМАНДЫ, И КАК КНОПКИ) ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     register_user(update.effective_user.id, update.effective_user.username, update.effective_user.first_name)
     tz = get_user_tz(update.effective_user.id).zone
@@ -150,10 +149,53 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown", reply_markup=main_kb()
     )
 
+async def settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    txt = "⚙️ *Настройки*"
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(txt, parse_mode="Markdown", reply_markup=settings_kb())
+    else:
+        await update.message.reply_text(txt, parse_mode="Markdown", reply_markup=settings_kb())
+
+async def tz_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    txt = "🌍 *Часовой пояс*"
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(txt, parse_mode="Markdown", reply_markup=tz_kb())
+    else:
+        await update.message.reply_text(txt, parse_mode="Markdown", reply_markup=tz_kb())
+
+async def templates_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    txt = "📝 *Быстрые шаблоны*\n\nВыберите, чтобы создать мгновенно:"
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(txt, parse_mode="Markdown", reply_markup=template_kb())
+    else:
+        await update.message.reply_text(txt, parse_mode="Markdown", reply_markup=template_kb())
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    txt = "*❓ Помощь*\n\n📅 *Форматы:*\n`Название завтра 15:00`\n`Задача сегодня 18:30`\n`Отчёт 31.12 20:00`\n\n⚙️ *Настройки:* смена пояса, шаблоны\n📋 *Список:* просмотр и управление"
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(txt, parse_mode="Markdown", reply_markup=settings_kb())
+    else:
+        await update.message.reply_text(txt, parse_mode="Markdown", reply_markup=settings_kb())
+
+async def back_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    txt = "🏠 *Главное меню*"
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(txt, parse_mode="Markdown", reply_markup=main_kb())
+    else:
+        await update.message.reply_text(txt, parse_mode="Markdown", reply_markup=main_kb())
+
 async def create_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    if q: await q.answer(); await q.edit_message_text("📝 *Новое напоминание*\n\nНапишите в одном сообщении:\n`Название + время`\n\nПримеры:\n• `Встреча завтра 15:00`\n• `Купить молоко сегодня 18:30`\n• `Отчёт 31.12 20:00`", parse_mode="Markdown")
-    else: await update.message.reply_text("📝 *Новое напоминание*\n\nНапишите: `Название + время`\nПример: `Встреча завтра 15:00`", parse_mode="Markdown")
+    txt = "📝 *Новое напоминание*\n\nНапишите в одном сообщении:\n`Название + время`\n\nПримеры:\n• `Встреча завтра 15:00`\n• `Купить молоко сегодня 18:30`\n• `Отчёт 31.12 20:00`"
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(txt, parse_mode="Markdown")
+    else:
+        await update.message.reply_text(txt, parse_mode="Markdown")
     context.user_data['awaiting_reminder'] = True
 
 async def handle_reminder_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -169,7 +211,6 @@ async def handle_reminder_input(update: Update, context: ContextTypes.DEFAULT_TY
     utc_dt = tz.localize(dt, is_dst=True).astimezone(pytz.UTC)
     rid = add_reminder(uid, title, utc_dt.strftime("%Y-%m-%d %H:%M:%S"), "none")
     
-    # Планируем
     sched = context.bot_data.get('scheduler')
     if sched: sched.add_job(send_reminder, trigger=DateTrigger(run_date=utc_dt), args=[uid, title, rid, context.application], id=f"rem_{rid}", replace_existing=True)
     
@@ -179,14 +220,17 @@ async def handle_reminder_input(update: Update, context: ContextTypes.DEFAULT_TY
     )
 
 async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    mf = q.edit_message_text if q else update.message.reply_text
-    if q: await q.answer()
     uid = update.effective_user.id; tz = get_user_tz(uid)
     rems = get_reminders(uid)
-    if not rems: return await mf("📭 Пока пусто. Создайте первое напоминание ➕", parse_mode="Markdown", reply_markup=main_kb())
+    if not rems:
+        txt = "📭 Пока пусто. Создайте первое напоминание ➕"
+        if update.callback_query:
+            await update.callback_query.answer()
+            await update.callback_query.edit_message_text(txt, parse_mode="Markdown", reply_markup=main_kb())
+        else:
+            await update.message.reply_text(txt, parse_mode="Markdown", reply_markup=main_kb())
+        return
     
-    # Группировка по датам
     grouped = {}
     for r in rems:
         day_key = fmt_dt(r[2], tz).split(',')[0]
@@ -200,27 +244,19 @@ async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg += f"• {title} {icon}\n"
         msg += "\n"
     msg += "💡 Нажмите на событие для управления"
-    await mf(msg, parse_mode="Markdown", reply_markup=main_kb())
-
-async def settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query; await q.answer()
-    await q.edit_message_text("⚙️ *Настройки*", parse_mode="Markdown", reply_markup=settings_kb())
-
-async def tz_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query; await q.answer()
-    await q.edit_message_text("🌍 *Часовой пояс*", parse_mode="Markdown", reply_markup=tz_kb())
-
-async def templates_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query; await q.answer()
-    await q.edit_message_text("📝 *Быстрые шаблоны*\n\nВыберите, чтобы создать мгновенно:", parse_mode="Markdown", reply_markup=template_kb())
+    
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(msg, parse_mode="Markdown", reply_markup=main_kb())
+    else:
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=main_kb())
 
 async def apply_template(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     title = q.data.replace("tpl_", "")
-    # Спрашиваем время для шаблона
     context.user_data['tpl_title'] = title
     await q.edit_message_text(f"📝 *{title}*\n\nУкажите время (например: `завтра 10:00`):", parse_mode="Markdown")
-    context.user_data['awaiting_reminder'] = True  # Переиспользуем тот же флаг
+    context.user_data['awaiting_reminder'] = True
 
 async def handle_tz_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; d = q.data; await q.answer()
@@ -248,15 +284,6 @@ async def handle_gps_location(update: Update, context: ContextTypes.DEFAULT_TYPE
         set_user_tz(update.effective_user.id, tz_name)
         await update.message.reply_text(f"✅ Пояс определён: *{tz_name}*", parse_mode="Markdown", reply_markup=main_kb())
     else: await update.message.reply_text("❌ Не удалось определить. Выберите вручную:", reply_markup=tz_kb())
-
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query; mf = q.edit_message_text if q else update.message.reply_text
-    if q: await q.answer()
-    await mf("*❓ Помощь*\n\n📅 *Форматы:*\n`Название завтра 15:00`\n`Задача сегодня 18:30`\n`Отчёт 31.12 20:00`\n\n⚙️ *Настройки:* смена пояса, шаблоны\n📋 *Список:* просмотр и управление", parse_mode="Markdown", reply_markup=settings_kb() if q else None)
-
-async def back_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query; await q.answer()
-    await q.edit_message_text("🏠 *Главное меню*", parse_mode="Markdown", reply_markup=main_kb())
 
 async def view_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
@@ -310,14 +337,13 @@ async def main():
     app = Application.builder().token(BOT_TOKEN).build()
     sched = AsyncIOScheduler(); sched.start(); app.bot_data['scheduler'] = sched
 
-    # Регистрация
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("settings", settings_menu))
     app.add_handler(CommandHandler("myevents", list_reminders))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("add", create_prompt))
     
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.UpdateType.MESSAGE, handle_reminder_input))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_reminder_input))
     app.add_handler(CallbackQueryHandler(create_prompt, pattern="^create_prompt$"))
     app.add_handler(CallbackQueryHandler(list_reminders, pattern="^list_reminders$"))
     app.add_handler(CallbackQueryHandler(settings_menu, pattern="^settings$"))
