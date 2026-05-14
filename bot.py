@@ -1,5 +1,5 @@
 # ==========================================
-# TELEGRAM REMINDER BOT - GROUP SUPPORT + RAILWAY
+# TELEGRAM REMINDER BOT - GROUP MENTIONS + RAILWAY
 # ==========================================
 
 import os, sys, sqlite3, logging, logging.handlers, re, asyncio, signal
@@ -8,7 +8,7 @@ import pytz
 from timezonefinder import TimezoneFinder
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, ConversationHandler
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.date import DateTrigger
 
@@ -27,28 +27,43 @@ tf = TimezoneFinder()
 # ========== БАЗА ДАННЫХ ==========
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
+        # Таблица пользователей
         conn.execute('''CREATE TABLE IF NOT EXISTS users
                         (user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT,
                          timezone TEXT DEFAULT 'Europe/Moscow', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
         try: conn.execute("ALTER TABLE users ADD COLUMN timezone TEXT DEFAULT 'Europe/Moscow'")
         except: pass
+        
+        # Таблица напоминаний (добавили chat_id)
         conn.execute('''CREATE TABLE IF NOT EXISTS reminders
-                        (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, title TEXT,
+                        (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, chat_id INTEGER, title TEXT,
                          reminder_datetime TEXT, repeat_type TEXT DEFAULT 'none', is_active INTEGER DEFAULT 1,
                          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (user_id) REFERENCES users (user_id))''')
+        try: conn.execute("ALTER TABLE reminders ADD COLUMN chat_id INTEGER")
+        except: pass
+        
         conn.commit()
 init_db()
 
 def register_user(uid, un=None, fn=None):
     with sqlite3.connect(DB_PATH) as conn: conn.execute("INSERT OR IGNORE INTO users VALUES (?,?,?,?,CURRENT_TIMESTAMP)", (uid, un, fn, 'Europe/Moscow')); conn.commit()
-def add_reminder(uid, t, dt, rt='none'):
-    with sqlite3.connect(DB_PATH) as conn: c=conn.cursor(); c.execute("INSERT INTO reminders (user_id, title, reminder_datetime, repeat_type) VALUES (?,?,?,?)", (uid,t,dt,rt)); conn.commit(); return c.lastrowid
+
+def add_reminder(uid, chat_id, t, dt, rt='none'):
+    with sqlite3.connect(DB_PATH) as conn: 
+        c=conn.cursor()
+        c.execute("INSERT INTO reminders (user_id, chat_id, title, reminder_datetime, repeat_type) VALUES (?,?,?,?,?)", (uid, chat_id, t, dt, rt))
+        conn.commit()
+        return c.lastrowid
+
 def get_reminders(uid, act=True):
     with sqlite3.connect(DB_PATH) as conn: q="SELECT id, title, reminder_datetime, repeat_type FROM reminders WHERE user_id=? AND is_active=1 ORDER BY reminder_datetime" if act else "SELECT id, title, reminder_datetime, repeat_type FROM reminders WHERE user_id=? ORDER BY reminder_datetime"; return conn.execute(q, (uid,)).fetchall()
+
 def get_reminder(rid, uid):
     with sqlite3.connect(DB_PATH) as conn: return conn.execute("SELECT id, title, reminder_datetime, repeat_type FROM reminders WHERE id=? AND user_id=?", (rid,uid)).fetchone()
+
 def del_reminder(rid, uid):
     with sqlite3.connect(DB_PATH) as conn: conn.execute("UPDATE reminders SET is_active=0 WHERE id=? AND user_id=?", (rid,uid)); conn.commit()
+
 def set_user_tz(uid, tz_name):
     with sqlite3.connect(DB_PATH) as conn: conn.execute("UPDATE users SET timezone=? WHERE user_id=?", (tz_name, uid)); conn.commit()
 
@@ -119,8 +134,8 @@ def settings_kb(): return InlineKeyboardMarkup([
 ])
 
 def tz_kb(): return InlineKeyboardMarkup([
-    [InlineKeyboardButton("🇷🇺 Москва (UTC+3)", callback_data="tz_Europe/Moscow"), InlineKeyboardButton("🇷🇺 Екатеринбург (UTC+5)", callback_data="tz_Asia/Yekaterinburg")],
-    [InlineKeyboardButton("🇷🇺 Новосибирск (UTC+7)", callback_data="tz_Asia/Novosibirsk"), InlineKeyboardButton("🇷🇺 Владивосток (UTC+10)", callback_data="tz_Asia/Vladivostok")],
+    [InlineKeyboardButton("🇷🇺 Москва (UTC+3)", callback_data="tz_Europe/Moscow"), InlineKeyboardButton("🇷 Екатеринбург (UTC+5)", callback_data="tz_Asia/Yekaterinburg")],
+    [InlineKeyboardButton("🇷 Новосибирск (UTC+7)", callback_data="tz_Asia/Novosibirsk"), InlineKeyboardButton("🇷🇺 Владивосток (UTC+10)", callback_data="tz_Asia/Vladivostok")],
     [InlineKeyboardButton("🌍 Лондон (UTC+0)", callback_data="tz_Europe/London"), InlineKeyboardButton("🌐 UTC", callback_data="tz_UTC")],
     [InlineKeyboardButton("📍 Авто (GPS)", callback_data="gps_request")],
     [InlineKeyboardButton("🔙 Назад", callback_data="settings")]
@@ -145,7 +160,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                f"• `/add Встреча завтра 15:00`\n"
                f"• `/myevents` — мои напоминания\n"
                f"• `/settings` — настройки\n\n"
-               f"📩 Напоминания приходят в личные сообщения, чтобы не спамить чат.")
+               f"📢 Напоминания придут в этот чат с упоминанием вас.")
     else:
         txt = (f"👋 *Привет!* Я бот-напоминалка.\n\n"
                f"🌍 Пояс: *{tz}*\n\n"
@@ -197,7 +212,6 @@ async def back_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(txt, parse_mode="Markdown", reply_markup=main_kb())
 
 async def create_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Поддержка /add <текст> для мгновенного создания в группах
     if context.args:
         text = " ".join(context.args)
         await process_reminder_text(update, context, text)
@@ -216,14 +230,20 @@ async def process_reminder_text(update, context, text):
     if not title or not dt:
         return await update.message.reply_text("❌ Не удалось распознать время.\n\nФормат: `Название завтра 15:00`", parse_mode="Markdown")
     
-    uid = update.effective_user.id; tz = get_user_tz(uid)
+    uid = update.effective_user.id
+    chat_id = update.effective_chat.id # 🔥 Сохраняем ID чата (группа или личка)
+    tz = get_user_tz(uid)
     utc_dt = tz.localize(dt, is_dst=True).astimezone(pytz.UTC)
-    rid = add_reminder(uid, title, utc_dt.strftime("%Y-%m-%d %H:%M:%S"), "none")
+    
+    rid = add_reminder(uid, chat_id, title, utc_dt.strftime("%Y-%m-%d %H:%M:%S"), "none")
     
     sched = context.bot_data.get('scheduler')
-    if sched: sched.add_job(send_reminder, trigger=DateTrigger(run_date=utc_dt), args=[uid, title, rid, context.application], id=f"rem_{rid}", replace_existing=True)
+    if sched: 
+        sched.add_job(send_reminder, trigger=DateTrigger(run_date=utc_dt), 
+                      args=[uid, title, chat_id, rid, context.application], 
+                      id=f"rem_{rid}", replace_existing=True)
     
-    await update.message.reply_text(f"✅ *Создано!*\n📌 {title}\n📅 {fmt_dt(utc_dt.strftime('%Y-%m-%d %H:%M:%S'), tz)}\n📩 Напомню в личные сообщения.", parse_mode="Markdown")
+    await update.message.reply_text(f"✅ *Создано!*\n📌 {title}\n📅 {fmt_dt(utc_dt.strftime('%Y-%m-%d %H:%M:%S'), tz)}\n📢 Напомню здесь.", parse_mode="Markdown")
 
 async def handle_reminder_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get('awaiting_reminder'): return
@@ -354,7 +374,6 @@ async def main():
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("add", create_prompt))
     
-    # 🔥 Естественный язык только в личных чатах (чтобы не реагировать на болтовню в группах)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_reminder_input))
     
     app.add_handler(CallbackQueryHandler(create_prompt, pattern="^create_prompt$"))
@@ -378,7 +397,7 @@ async def main():
         BotCommand("myevents", "📋 Мои"), BotCommand("settings", "⚙️ Настройки")
     ])
 
-    logger.info("✅ Бот запущен и готов к работе в группах!")
+    logger.info("✅ Бот запущен!")
     await app.initialize(); await app.start(); await app.updater.start_polling(drop_pending_updates=True)
     
     stop_event = asyncio.Event()
@@ -387,9 +406,19 @@ async def main():
     await stop_event.wait()
     await app.updater.stop(); await app.stop(); await app.shutdown(); sched.shutdown()
 
-async def send_reminder(uid, title, rid, app):
-    try: await app.bot.send_message(chat_id=uid, text=f"🔔 *Напоминание!*\n\n📝 *{title}*\n\nВремя пришло!", parse_mode="Markdown")
-    except Exception as e: logger.error(f"Send fail: {e}")
+# 🔥 УЛУЧШЕННАЯ ФУНКЦИЯ ОТПРАВКИ НАПОМИНАНИЯ
+async def send_reminder(uid, title, chat_id, rid, app):
+    # Создаем упоминание пользователя через tg://user?id=UID
+    # Это сработает даже если у юзера нет username (@name)
+    mention = f"[User](tg://user?id={uid})"
+    
+    text = f"🔔 *Напоминание для {mention}!*\n\n📝 *{title}*\n\nВремя пришло! ⏰"
+    
+    try:
+        await app.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Failed to send reminder to chat {chat_id}: {e}")
+        # Если бота кикнули из группы или заблокировали, логируем ошибку
 
 if __name__ == "__main__":
     try: asyncio.run(main())
