@@ -1,4 +1,0 @@
-python-telegram-bot>=20.0
-starlette
-uvicorn
-pytz
