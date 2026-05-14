@@ -1,5 +1,5 @@
 # ==========================================
-# TELEGRAM REMINDER BOT - RAILWAY OPTIMIZED (FIXED)
+# TELEGRAM REMINDER BOT - GROUP SUPPORT + RAILWAY
 # ==========================================
 
 import os, sys, sqlite3, logging, logging.handlers, re, asyncio, signal
@@ -45,9 +45,6 @@ def add_reminder(uid, t, dt, rt='none'):
     with sqlite3.connect(DB_PATH) as conn: c=conn.cursor(); c.execute("INSERT INTO reminders (user_id, title, reminder_datetime, repeat_type) VALUES (?,?,?,?)", (uid,t,dt,rt)); conn.commit(); return c.lastrowid
 def get_reminders(uid, act=True):
     with sqlite3.connect(DB_PATH) as conn: q="SELECT id, title, reminder_datetime, repeat_type FROM reminders WHERE user_id=? AND is_active=1 ORDER BY reminder_datetime" if act else "SELECT id, title, reminder_datetime, repeat_type FROM reminders WHERE user_id=? ORDER BY reminder_datetime"; return conn.execute(q, (uid,)).fetchall()
-def get_upcoming(uid, lim=10):
-    now=datetime.now(pytz.UTC).strftime("%Y-%m-%d %H:%M:%S")
-    with sqlite3.connect(DB_PATH) as conn: return conn.execute("SELECT id, title, reminder_datetime, repeat_type FROM reminders WHERE user_id=? AND is_active=1 AND reminder_datetime > ? ORDER BY reminder_datetime LIMIT ?", (uid,now,lim)).fetchall()
 def get_reminder(rid, uid):
     with sqlite3.connect(DB_PATH) as conn: return conn.execute("SELECT id, title, reminder_datetime, repeat_type FROM reminders WHERE id=? AND user_id=?", (rid,uid)).fetchone()
 def del_reminder(rid, uid):
@@ -135,19 +132,29 @@ def template_kb(): return InlineKeyboardMarkup([
     [InlineKeyboardButton("🔙 Назад", callback_data="settings")]
 ])
 
-# ========== УНИВЕРСАЛЬНЫЕ ХЕНДЛЕРЫ (РАБОТАЮТ И КАК КОМАНДЫ, И КАК КНОПКИ) ==========
+# ========== ХЕНДЛЕРЫ ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     register_user(update.effective_user.id, update.effective_user.username, update.effective_user.first_name)
     tz = get_user_tz(update.effective_user.id).zone
-    await update.message.reply_text(
-        f"👋 *Привет!* Я бот-напоминалка.\n\n"
-        f"🌍 Пояс: *{tz}*\n\n"
-        f"💡 *Быстрый старт:*\n"
-        f"• Нажмите ➕ *Создать*\n"
-        f"• Или напишите: `Встреча завтра 15:00`\n\n"
-        f"📋 `/myevents` — список\n⚙️ `/settings` — настройки",
-        parse_mode="Markdown", reply_markup=main_kb()
-    )
+    chat_type = update.effective_chat.type
+    
+    if chat_type in ['group', 'supergroup']:
+        txt = (f"👋 *Привет, группа!* Я бот-напоминалка.\n\n"
+               f"🌍 Мой пояс: *{tz}*\n\n"
+               f"💡 *Как использовать в группе:*\n"
+               f"• `/add Встреча завтра 15:00`\n"
+               f"• `/myevents` — мои напоминания\n"
+               f"• `/settings` — настройки\n\n"
+               f"📩 Напоминания приходят в личные сообщения, чтобы не спамить чат.")
+    else:
+        txt = (f"👋 *Привет!* Я бот-напоминалка.\n\n"
+               f"🌍 Пояс: *{tz}*\n\n"
+               f"💡 *Быстрый старт:*\n"
+               f"• Напишите: `Встреча завтра 15:00`\n"
+               f"• Или нажмите ➕ *Создать*\n\n"
+               f"📋 `/myevents` — список\n⚙️ `/settings` — настройки")
+    
+    await update.message.reply_text(txt, parse_mode="Markdown", reply_markup=main_kb())
 
 async def settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = "⚙️ *Настройки*"
@@ -190,7 +197,13 @@ async def back_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(txt, parse_mode="Markdown", reply_markup=main_kb())
 
 async def create_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    txt = "📝 *Новое напоминание*\n\nНапишите в одном сообщении:\n`Название + время`\n\nПримеры:\n• `Встреча завтра 15:00`\n• `Купить молоко сегодня 18:30`\n• `Отчёт 31.12 20:00`"
+    # Поддержка /add <текст> для мгновенного создания в группах
+    if context.args:
+        text = " ".join(context.args)
+        await process_reminder_text(update, context, text)
+        return
+    
+    txt = "📝 *Новое напоминание*\n\nНапишите в одном сообщении:\n`Название + время`\n\nПримеры:\n• `Встреча завтра 15:00`\n• `Купить молоко сегодня 18:30`"
     if update.callback_query:
         await update.callback_query.answer()
         await update.callback_query.edit_message_text(txt, parse_mode="Markdown")
@@ -198,14 +211,10 @@ async def create_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(txt, parse_mode="Markdown")
     context.user_data['awaiting_reminder'] = True
 
-async def handle_reminder_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get('awaiting_reminder'): return
-    context.user_data.pop('awaiting_reminder', None)
-    text = update.message.text
+async def process_reminder_text(update, context, text):
     title, dt = parse_natural_reminder(text)
-    
     if not title or not dt:
-        return await update.message.reply_text("❌ Не удалось распознать время.\n\nПопробуйте формат:\n`Название завтра 15:00`\n`Задача сегодня 18:30`", parse_mode="Markdown", reply_markup=main_kb())
+        return await update.message.reply_text("❌ Не удалось распознать время.\n\nФормат: `Название завтра 15:00`", parse_mode="Markdown")
     
     uid = update.effective_user.id; tz = get_user_tz(uid)
     utc_dt = tz.localize(dt, is_dst=True).astimezone(pytz.UTC)
@@ -214,10 +223,12 @@ async def handle_reminder_input(update: Update, context: ContextTypes.DEFAULT_TY
     sched = context.bot_data.get('scheduler')
     if sched: sched.add_job(send_reminder, trigger=DateTrigger(run_date=utc_dt), args=[uid, title, rid, context.application], id=f"rem_{rid}", replace_existing=True)
     
-    await update.message.reply_text(
-        f"✅ *Создано!*\n\n📌 {title}\n📅 {fmt_dt(utc_dt.strftime('%Y-%m-%d %H:%M:%S'), tz)}\n🔄 Без повтора\n\n💡 Нажмите на событие в списке «📋 Мои», чтобы изменить повтор или удалить.",
-        parse_mode="Markdown", reply_markup=main_kb()
-    )
+    await update.message.reply_text(f"✅ *Создано!*\n📌 {title}\n📅 {fmt_dt(utc_dt.strftime('%Y-%m-%d %H:%M:%S'), tz)}\n📩 Напомню в личные сообщения.", parse_mode="Markdown")
+
+async def handle_reminder_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get('awaiting_reminder'): return
+    context.user_data.pop('awaiting_reminder', None)
+    await process_reminder_text(update, context, update.message.text)
 
 async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id; tz = get_user_tz(uid)
@@ -343,7 +354,9 @@ async def main():
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("add", create_prompt))
     
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_reminder_input))
+    # 🔥 Естественный язык только в личных чатах (чтобы не реагировать на болтовню в группах)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_reminder_input))
+    
     app.add_handler(CallbackQueryHandler(create_prompt, pattern="^create_prompt$"))
     app.add_handler(CallbackQueryHandler(list_reminders, pattern="^list_reminders$"))
     app.add_handler(CallbackQueryHandler(settings_menu, pattern="^settings$"))
@@ -365,7 +378,7 @@ async def main():
         BotCommand("myevents", "📋 Мои"), BotCommand("settings", "⚙️ Настройки")
     ])
 
-    logger.info("✅ Бот запущен!")
+    logger.info("✅ Бот запущен и готов к работе в группах!")
     await app.initialize(); await app.start(); await app.updater.start_polling(drop_pending_updates=True)
     
     stop_event = asyncio.Event()
